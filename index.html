@@ -190,6 +190,9 @@
 (() => {
   const tg = window.Telegram?.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
+  const params = new URLSearchParams(location.search);
+  // The bot attaches the current HTTPS tunnel URL to the Mini App button as ?api=...
+  const API_BASE_URL = (params.get('api') || '').replace(/\/+$/, '');
   const $ = (id) => document.getElementById(id);
   const stateLabels = { approved: 'В планах', done: 'Сделано', pending: 'На решении', rejected: 'Отклонено', revision: 'Доработка' };
   let payload = { uid: 0, admin: false, w: [] };
@@ -262,13 +265,71 @@
       $('emptyAdd').addEventListener('click', showAdd);
     } else $('wishList').innerHTML = list.map(card).join('');
   }
-  function send(action) {
-    const data = JSON.stringify(action);
-    if (tg && typeof tg.sendData === 'function') {
-      tg.sendData(data); // Telegram closes keyboard-launched Mini Apps after sendData.
-    } else {
-      showToast('Демо-режим: откройте это приложение через кнопку в Telegram.');
-      console.log('Mini App action:', action);
+  async function apiRequest(path, options = {}) {
+    if (!API_BASE_URL) {
+      throw new Error('Не настроен API-адрес. Открой приложение через свежую кнопку бота после настройки API_PUBLIC_URL.');
+    }
+    if (!tg || !tg.initData) {
+      throw new Error('Открой приложение через Telegram, а не обычную вкладку браузера.');
+    }
+    let response;
+    try {
+      response = await fetch(`${API_BASE_URL}${path}`, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': tg.initData,
+          ...(options.headers || {})
+        }
+      });
+    } catch (e) {
+      throw new Error('Не удалось связаться с API. Проверь, что бот и Cloudflare Tunnel запущены.');
+    }
+    let data;
+    try { data = await response.json(); }
+    catch { throw new Error('API вернул непонятный ответ.'); }
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Не удалось выполнить действие.');
+    return data;
+  }
+
+  async function refreshFromApi(showError = true) {
+    if (!API_BASE_URL || !tg?.initData) return false;
+    try {
+      const data = await apiRequest('/api/wishes');
+      payload = data.payload;
+      render();
+      return true;
+    } catch (e) {
+      if (showError) showToast(e.message || 'Не удалось обновить желания.');
+      return false;
+    }
+  }
+
+  async function send(action) {
+    const active = document.activeElement;
+    if (active && active.matches('button')) active.disabled = true;
+    showToast('Сохраняю…');
+    try {
+      const result = await apiRequest('/api/action', { method: 'POST', body: JSON.stringify(action) });
+      payload = result.payload;
+      if (action.action === 'add') {
+        $('wishForm').reset();
+        scope = 'all';
+        setNav('home');
+        showHome();
+      } else if (action.action === 'done') {
+        scope = 'done';
+        setNav('history');
+        showHome();
+      } else {
+        scope = 'all';
+      }
+      render();
+      showToast(result.message || 'Сохранено.');
+    } catch (e) {
+      showToast(e.message || 'Не удалось сохранить. Приложение осталось открытым.');
+    } finally {
+      if (active && active.matches('button')) active.disabled = false;
     }
   }
   function showAdd() {
@@ -309,6 +370,10 @@
   });
   decodePayload();
   render();
+  // API actions use fetch, so Telegram keeps the Mini App open after each save.
+  refreshFromApi(false).then(ok => {
+    if (!ok && API_BASE_URL) showToast('Нет связи с сервером. Проверь работу бота и туннеля.');
+  });
 })();
 </script>
 </body>
